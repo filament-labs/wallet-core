@@ -14,6 +14,15 @@ type sessionState struct {
 
 const sessionTTL = 30 * time.Minute
 
+func (m *manager) UnlockWallet(wallet Wallet, password string) (*keystore.Key, error) {
+	key, err := keystore.DecryptKey(wallet.KeyJSON, password)
+	if err != nil {
+		return nil, fmt.Errorf("invalid wallet password: %w", err)
+	}
+
+	return key, nil
+}
+
 func (m *manager) UnlockWallets(password string) error {
 	if len(m.wallets) == 0 {
 		return nil
@@ -24,10 +33,10 @@ func (m *manager) UnlockWallets(password string) error {
 
 	unlocked := make(map[string]*keystore.Key)
 	for _, w := range m.wallets {
-		key, err := keystore.DecryptKey(w.KeyJSON, password)
+		key, err := m.UnlockWallet(w, password)
 		if err != nil {
-			// zero any partially decrypted keys
-			return fmt.Errorf("invalid password: %w", err)
+			zeroECDSAKey(w.key.PrivateKey)
+			return err
 		}
 
 		unlocked[w.ID] = key

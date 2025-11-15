@@ -13,7 +13,9 @@ import (
 
 type Manager interface {
 	LoadWallets(ctx context.Context) ([]Wallet, error)
+	CreateWallet(ctx context.Context, walletName, keystorePassphrase string) (*Wallet, error)
 	RecoverWallet(ctx context.Context, seedPhrase, walletName, password string) (*Wallet, error)
+	DeleteWallet(walletID string) error
 }
 
 type manager struct {
@@ -78,20 +80,13 @@ func NewManager(dataDir string, opts ...ManagerOption) (Manager, error) {
 	return m, nil
 }
 
-/**func (m *manager) UnlockWallet(wallet *Wallet, keystorePassphrase string) (*keystore.Key, error) {
-	key, err := keystore.DecryptKey(wallet.KeyJSON, keystorePassphrase)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unlock wallet %s: %w", wallet.ID, err)
-	}
-
-	return key, nil
-}**/
-
 func (m *manager) LoadWallets(ctx context.Context) ([]Wallet, error) {
 	wallets, err := m.db.GetWallets()
 	if err != nil {
 		return nil, fmt.Errorf("error loading wallets: %w", err)
 	}
+
+	m.wallets = map[string]Wallet{}
 
 	for _, wal := range wallets {
 		m.wallets[wal.ID] = wal
@@ -182,5 +177,28 @@ func (m *manager) createWalletFromMnemonic(mnemonic, name, keystorePassphrase st
 		return nil, err
 	}
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.wallets[wallet.ID] = *wallet
+
+	key, err := m.UnlockWallet(*wallet, keystorePassphrase)
+	if err != nil {
+		return nil, err
+	}
+
+	unlockedWallets := m.session.unlockedKeys
+	unlockedWallets[wallet.ID] = key
+	m.session.unlockedKeys = unlockedWallets
+
 	return wallet, nil
+}
+
+func (m *manager) DeleteWallet(walletID string) error {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// TODO
+
+	return nil
 }
