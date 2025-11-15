@@ -3,22 +3,32 @@ package walletcore
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/google/uuid"
 )
 
-type Manager struct {
-	rpcClient *RPCClient
-	db        *db
+type Manager interface {
+	LoadWallets(ctx context.Context) ([]Wallet, error)
+	RecoverWallet(ctx context.Context, seedPhrase, walletName, password string) (*Wallet, error)
 }
 
-type ManagerOption func(*Manager) error
+type manager struct {
+	rpcClient *RPCClient
+	db        *db
+	dataDir   string
+	wallets   map[string]Wallet
+	session   *sessionState
+	mu        sync.RWMutex
+}
+type ManagerOption func(*manager) error
 
 // WithRPC allows setting a custom RPC endpoint and optional token
 func WithOptions(url, token string) ManagerOption {
-	return func(m *Manager) error {
+	return func(m *manager) error {
 		if url == "" {
 			url = "https://filfox.info/rpc/v1"
 		}
@@ -35,14 +45,16 @@ func WithOptions(url, token string) ManagerOption {
 }
 
 // NewManager initializes a Manager with Badger DB and optional configurations
-func NewManager(dbPath string, opts ...ManagerOption) (*Manager, error) {
-	db, err := newDB(dbPath)
+func NewManager(dataDir string, opts ...ManagerOption) (Manager, error) {
+	db, err := newDB(filepath.Join(dataDir, "db"))
 	if err != nil {
 		return nil, err
 	}
 
-	m := &Manager{
-		db: db,
+	m := &manager{
+		db:      db,
+		dataDir: dataDir,
+		wallets: make(map[string]Wallet),
 	}
 
 	// Apply options
@@ -66,17 +78,30 @@ func NewManager(dbPath string, opts ...ManagerOption) (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) UnlockWallet(wallet *Wallet, keystorePassphrase string) (*keystore.Key, error) {
+/**func (m *manager) UnlockWallet(wallet *Wallet, keystorePassphrase string) (*keystore.Key, error) {
 	key, err := keystore.DecryptKey(wallet.KeyJSON, keystorePassphrase)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unlock wallet %s: %w", wallet.ID, err)
 	}
 
 	return key, nil
+}**/
+
+func (m *manager) LoadWallets(ctx context.Context) ([]Wallet, error) {
+	wallets, err := m.db.GetWallets()
+	if err != nil {
+		return nil, fmt.Errorf("error loading wallets: %w", err)
+	}
+
+	for _, wal := range wallets {
+		m.wallets[wal.ID] = wal
+	}
+
+	return nil, nil
 }
 
 // CreateWallet generates a brand-new wallet, persists it, and returns the in-memory instance (locked).
-func (m *Manager) CreateWallet(ctx context.Context, walletName, keystorePassphrase string) (*Wallet, error) {
+func (m *manager) CreateWallet(ctx context.Context, walletName, keystorePassphrase string) (*Wallet, error) {
 	if keystorePassphrase == "" {
 		return nil, ErrInvalidPassphrase
 	}
@@ -95,7 +120,7 @@ func (m *Manager) CreateWallet(ctx context.Context, walletName, keystorePassphra
 }
 
 // RecoverWallet recovers a wallet from a mnemonic phrase
-func (m *Manager) RecoverWallet(ctx context.Context, mnemonic, name, keystorePassphrase string) (*Wallet, error) {
+func (m *manager) RecoverWallet(ctx context.Context, mnemonic, name, keystorePassphrase string) (*Wallet, error) {
 	if !ValidateMnemonic(mnemonic) {
 		return nil, ErrInvalidMnemonic
 	}
@@ -108,7 +133,7 @@ func (m *Manager) RecoverWallet(ctx context.Context, mnemonic, name, keystorePas
 }
 
 // createWalletFromMnemonic creates a wallet from a mnemonic phrase
-func (m *Manager) createWalletFromMnemonic(mnemonic, name, keystorePassphrase string, recovered bool) (*Wallet, error) {
+func (m *manager) createWalletFromMnemonic(mnemonic, name, keystorePassphrase string, recovered bool) (*Wallet, error) {
 	// Generate seed from mnemonic
 	seed := MnemonicToSeed(mnemonic, "")
 
@@ -119,7 +144,7 @@ func (m *Manager) createWalletFromMnemonic(mnemonic, name, keystorePassphrase st
 	}
 
 	// Create keystore encryption
-	ks := keystore.NewKeyStore("", keystore.StandardScryptN, keystore.StandardScryptP)
+	ks := keystore.NewKeyStore(getKeyStoreDir(m.dataDir), keystore.StandardScryptN, keystore.StandardScryptP)
 	account, err := ks.ImportECDSA(privKey, keystorePassphrase)
 	if err != nil {
 		return nil, fmt.Errorf("import ecdsa: %w", err)
@@ -150,6 +175,11 @@ func (m *Manager) createWalletFromMnemonic(mnemonic, name, keystorePassphrase st
 
 	if recovered {
 		wallet.Meta["recovered"] = "true"
+	}
+
+	err = m.db.SaveWallet(wallet)
+	if err != nil {
+		return nil, err
 	}
 
 	return wallet, nil
